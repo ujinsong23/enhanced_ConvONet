@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from src.layers import ResnetBlockFC
-from torch_scatter import scatter_mean, scatter_max
+from torch_scatter import scatter_mean, scatter_max, scatter_min, scatter_sum
 from src.common import coordinate2index, normalize_coordinate, normalize_3d_coordinate, map2local
 from src.encoder.unet import UNet
 from src.encoder.unet3d import UNet3D
@@ -30,7 +30,7 @@ class LocalPoolPointnet(nn.Module):
 
     def __init__(self, c_dim=128, dim=3, hidden_dim=128, scatter_type='max', 
                  unet=False, unet_kwargs=None, unet3d=False, unet3d_kwargs=None, 
-                 plane_resolution=None, grid_resolution=None, plane_type='xz', padding=0.1, n_blocks=5):
+                 plane_resolution=None, grid_resolution=None, plane_type='xz', third_coord=False, padding=0.1, n_blocks=5):
         super().__init__()
         self.c_dim = c_dim
 
@@ -42,6 +42,8 @@ class LocalPoolPointnet(nn.Module):
 
         self.actvn = nn.ReLU()
         self.hidden_dim = hidden_dim
+
+        self.conv_z = UNet(1, in_channels=4, depth=2, start_filts=4)
 
         if unet:
             self.unet = UNet(c_dim, in_channels=c_dim, **unet_kwargs)
@@ -56,6 +58,7 @@ class LocalPoolPointnet(nn.Module):
         self.reso_plane = plane_resolution
         self.reso_grid = grid_resolution
         self.plane_type = plane_type
+        self.third_coord = third_coord ## Consider remaining third coordinate for 2d projection
         self.padding = padding
 
         if scatter_type == 'max':
@@ -71,11 +74,44 @@ class LocalPoolPointnet(nn.Module):
         xy = normalize_coordinate(p.clone(), plane=plane, padding=self.padding) # normalize to the range of (0, 1)
         index = coordinate2index(xy, self.reso_plane)
 
+        pp = p.clone()
+        if plane=='xy':
+            z = pp[:,:,2][:,None,:] # z coordinate
+        elif plane=='yz':
+            z = pp[:,:,0][:,None,:] # x coordinate
+        elif plane=='xz':
+            z = pp[:,:,1][:,None,:] # y coordinate
+        z = z/(1+self.padding+10e-6)
+        z = torch.clamp(z+0.5, min = 0.0, max = 1 - 10e-6)
+
         # scatter plane features from points
         fea_plane = c.new_zeros(p.size(0), self.c_dim, self.reso_plane**2)
         c = c.permute(0, 2, 1) # B x 512 x T
         fea_plane = scatter_mean(c, index, out=fea_plane) # B x 512 x reso^2
         fea_plane = fea_plane.reshape(p.size(0), self.c_dim, self.reso_plane, self.reso_plane) # sparce matrix (B x 512 x reso x reso)
+
+        if self.third_coord:
+            one = p.new_ones((p.size(0),1,p.size(1)))
+            if self.third_coord=='sum':
+                weight = scatter_sum(one,index,dim_size=self.reso_plane**2)/p.size(1)
+                weight = weight.reshape(-1,1,self.reso_plane,self.reso_plane)
+
+            elif self.third_coord=='range':
+                weight = scatter_max(z,index,dim_size=self.reso_plane**2)[0]\
+                            - scatter_min(z,index,dim_size=self.reso_plane**2)[0]
+                weight = weight.reshape(-1,1,self.reso_plane,self.reso_plane)
+            
+            elif self.third_coord=='mix':
+                weight = torch.cat((scatter_max(z,index,dim_size=self.reso_plane**2)[0],
+                                    scatter_min(z,index,dim_size=self.reso_plane**2)[0],
+                                    scatter_mean(z,index,dim_size=self.reso_plane**2),
+                                    scatter_sum(z,index,dim_size=self.reso_plane**2)),dim=1)
+                weight = self.conv_z(weight.reshape(p.size(0),-1,self.reso_plane,self.reso_plane))
+                
+            else:
+                raise ValueError('incorrect third_coord weight type')
+            
+            fea_plane = weight*fea_plane
 
         # process the plane features with UNet
         if self.unet is not None:

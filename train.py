@@ -1,3 +1,4 @@
+from tqdm import tqdm
 import torch
 import torch.optim as optim
 from tensorboardX import SummaryWriter
@@ -10,50 +11,45 @@ from src import config, data
 from src.checkpoints import CheckpointIO
 from collections import defaultdict
 import shutil
-
+import pickle
 
 # Arguments
 parser = argparse.ArgumentParser(
-    description='Train a 3D reconstruction model.'
+    description='Train a model using a different encoder.'
 )
-parser.add_argument('config', type=str, help='Path to config file.')
-parser.add_argument('--no-cuda', action='store_true', help='Do not use cuda.')
+parser.add_argument('--encoder-type', type=str, 
+                    help='Specify the encoder type as one of "sum", "range", "mix" or "none".')
 parser.add_argument('--exit-after', type=int, default=-1,
                     help='Checkpoint and exit after specified number of seconds'
                          'with exit code 2.')
 
 args = parser.parse_args()
-cfg = config.load_config(args.config, 'configs/default.yaml')
-is_cuda = (torch.cuda.is_available() and not args.no_cuda)
-device = torch.device("cuda" if is_cuda else "cpu")
+assert args.encoder_type in ['sum','range','none',"mix"], \
+        "mode is invalid. encoder type is one of 'sum', 'range', 'mix' or 'none'."
+
+# Load config
+cfg_dir = f'configs/pointcloud/shapenet_3plane_indoor_weight{args.encoder_type}.yaml'
+cfg = config.load_config(cfg_dir, 'configs/default.yaml')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+out_dir = cfg['training']['out_dir'] 
+if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
+shutil.copyfile(cfg_dir, os.path.join(out_dir, 'config.yaml'))
+
+batch_size = cfg['training']['batch_size'] # 32
+backup_every = cfg['training']['backup_every'] # 10000
+vis_n_outputs = cfg['generation']['vis_n_outputs'] # 2
+exit_after = args.exit_after
+
 # Set t0
 t0 = time.time()
 
-# Shorthands
-out_dir = cfg['training']['out_dir']
-batch_size = cfg['training']['batch_size']
-backup_every = cfg['training']['backup_every']
-vis_n_outputs = cfg['generation']['vis_n_outputs']
-exit_after = args.exit_after
-
 model_selection_metric = cfg['training']['model_selection_metric']
-if cfg['training']['model_selection_mode'] == 'maximize':
-    model_selection_sign = 1
-elif cfg['training']['model_selection_mode'] == 'minimize':
-    model_selection_sign = -1
-else:
-    raise ValueError('model_selection_mode must be '
-                     'either maximize or minimize.')
+model_selection_sign = 1
 
-# Output directory
-if not os.path.exists(out_dir):
-    os.makedirs(out_dir)
-
-shutil.copyfile(args.config, os.path.join(out_dir, 'config.yaml'))
-
-# Dataset
-train_dataset = config.get_dataset('train', cfg)
-val_dataset = config.get_dataset('val', cfg, return_idx=True)
+train_dataset = config.get_dataset('train', cfg) 
+val_dataset = config.get_dataset('val', cfg, return_idx=True) 
 
 train_loader = torch.utils.data.DataLoader(
     train_dataset, batch_size=batch_size, num_workers=cfg['training']['n_workers'], shuffle=True,
@@ -65,17 +61,18 @@ val_loader = torch.utils.data.DataLoader(
     collate_fn=data.collate_remove_none,
     worker_init_fn=data.worker_init_fn)
 
-# For visualizations
 vis_loader = torch.utils.data.DataLoader(
     val_dataset, batch_size=1, shuffle=False,
     collate_fn=data.collate_remove_none,
     worker_init_fn=data.worker_init_fn)
+
+
 model_counter = defaultdict(int)
 data_vis_list = []
 
 # Build a data dictionary for visualization
 iterator = iter(vis_loader)
-for i in range(len(vis_loader)):
+for i in tqdm(range(len(vis_loader)), desc='Building a data dictionary for visualization'):
     data_vis = next(iterator)
     idx = data_vis['idx'].item()
     model_dict = val_dataset.get_model_dict(idx)
@@ -107,6 +104,7 @@ try:
     load_dict = checkpoint_io.load('model.pt')
 except FileExistsError:
     load_dict = dict()
+
 epoch_it = load_dict.get('epoch_it', 0)
 it = load_dict.get('it', 0)
 metric_val_best = load_dict.get(
@@ -123,26 +121,40 @@ print_every = cfg['training']['print_every']
 checkpoint_every = cfg['training']['checkpoint_every']
 validate_every = cfg['training']['validate_every']
 visualize_every = cfg['training']['visualize_every']
+print(f'\nIteration Info:\n-print every {print_every} iter')
+print(f'-checkpoint every {checkpoint_every} iter')
+print(f'-validate every {validate_every} iter')
+print(f'-visualize every {visualize_every} iter')
 
 # Print model
+print('\nModel/data Info:')
+print(f'-Enocder type : {args.encoder_type}')
+print(f'-Train data  {len(train_dataset)}, Validation data: {len(val_dataset)}')
+print(f'-Batch size: {batch_size}, {len(train_dataset)/batch_size:.2f} iterations per epoch')
 nparameters = sum(p.numel() for p in model.parameters())
-print('Total number of parameters: %d' % nparameters)
+print('-Total number of parameters: %d' % nparameters)
+print('\nOutput path: ', cfg['training']['out_dir'])
+print()
 
-print('output path: ', cfg['training']['out_dir'])
 
-while True:
+train_losses = dict()
+validation_iou = dict()
+losses = []
+while (epoch_it<100):
     epoch_it += 1
-
     for batch in train_loader:
         it += 1
         loss = trainer.train_step(batch)
         logger.add_scalar('train/loss', loss, it)
+        losses.append(loss)
 
         # Print output
         if print_every > 0 and (it % print_every) == 0:
             t = datetime.datetime.now()
             print('[Epoch %02d] it=%03d, loss=%.4f, time: %.2fs, %02d:%02d'
                      % (epoch_it, it, loss, time.time() - t0, t.hour, t.minute))
+            train_losses[it]=np.mean(losses)
+            losses = []
 
         # Visualize output
         if visualize_every > 0 and (it % visualize_every) == 0:
@@ -159,7 +171,6 @@ while True:
                     mesh, stats_dict = out, {}
 
                 mesh.export(os.path.join(out_dir, 'vis', '{}_{}_{}.off'.format(it, data_vis['category'], data_vis['it'])))
-
 
         # Save checkpoint
         if (checkpoint_every > 0 and (it % checkpoint_every) == 0):
@@ -178,6 +189,7 @@ while True:
             metric_val = eval_dict[model_selection_metric]
             print('Validation metric (%s): %.4f'
                   % (model_selection_metric, metric_val))
+            validation_iou[it]=metric_val
 
             for k, v in eval_dict.items():
                 logger.add_scalar('val/%s' % k, v, it)
@@ -194,3 +206,13 @@ while True:
             checkpoint_io.save('model.pt', epoch_it=epoch_it, it=it,
                                loss_val_best=metric_val_best)
             exit(3)
+
+print(f'Train (it: {it}, epoch_it: {epoch_it}) ended')
+print(f'Elapsed {time.time()-t0:.2f}sec')
+
+# Save 
+with open(os.path.join(out_dir, 'train_losses.pkl'), 'wb') as fp:
+    pickle.dump(train_losses, fp)
+
+with open(os.path.join(out_dir, 'validation_iou.pkl'), 'wb') as fp:
+    pickle.dump(validation_iou, fp)
