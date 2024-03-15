@@ -55,6 +55,8 @@ shapenet_3plane_indoor_weightrange.yaml
 shapenet_3plane_indoor_weightsum.yaml
 ```
 
+The output for executing the code has already been stored in the `out` folder.
+
 
 ## View Training Results
 Finally, to plot training error and validation iou, use the following command
