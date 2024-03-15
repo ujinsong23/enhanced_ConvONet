@@ -1,7 +1,14 @@
 _The project took place in Feb - Mar 2024_
 # Enhanced Convolutional Occupancy Networks
 
-~~
+The Enhanced Convolutional Occupancy Network aims to create a more effective representation of 3D scenes by
+incorporating all three coordinate values of 3D coordinates in its plane encoding process. In contrast to the Convolutional Occupancy
+Network(ConvONet), which discards non-projected coordinates during orthographic projection onto canonical planes for 2D plane
+encoder, the proposed method integrates these additional dimensions to improve feature extraction. Experimental results showcase
+the method’s effectiveness in achieving faster convergence and generating higher-quality 3D reconstructions, as evidenced by higher
+Intersection over Union (IoU) scores, while maintaining a comparable computational burden in terms of time and memory usage when
+compared to existing methods.
+
 
 ## Installation
 First you have to make sure that you have all dependencies in place.
@@ -30,15 +37,35 @@ In this paper, we only consider ShapeNet dataset:
 You can download the dataset (73.4 GB) by running the [script](https://github.com/autonomousvision/occupancy_networks#preprocessed-data) from Occupancy Networks. After, you should have the dataset in `data/ShapeNet` folder.
 
 ## Train
+To train model, use the following command
+```
+python train.py --encoder-type ENCODER
+```
 
+Replace ENCODER with one of the following options: "sum", "range", "mix", or "none". 
+This command will automatically load the corresponding configuration files from the `configs/pointcloud` folder.
+
+```
+shapenet_3plane_indoor_weightmix.yaml
+shapenet_3plane_indoor_weightnone.yaml
+shapenet_3plane_indoor_weightrange.yaml
+shapenet_3plane_indoor_weightsum.yaml
+```
 
 
 ## View Training Results
-Finally, to train a new network from scratch, run:
+Finally, to plot training error and validation iou, use the following command
 ```
-python train.py CONFIG.yaml
+python plot_result
 ```
-For available training options, please take a look at `configs/default.yaml`.
+This command will generate plots for all four different models: "sum", "range", "mix", and "none".
+
+If you want to plot the graph for only one of these modes, use the following command:
+
+```
+python plot_result --plot-mode ENCODER
+```
+Replace ENCODER with one of the following options: "sum", "range", "mix", or "none". This command will generate a plot specifically for the chosen encoder type.
 
 
 ## Further Information
