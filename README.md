@@ -1,4 +1,6 @@
 _The project took place in Feb - Mar 2024_
+
+_Project for EE367(Computational Imaging), Stanford University_
 # Enhanced Convolutional Occupancy Networks
 
 The Enhanced Convolutional Occupancy Network aims to create a more effective representation of 3D scenes by
@@ -8,6 +10,7 @@ encoder, the proposed method integrates these additional dimensions to improve f
 the method’s effectiveness in achieving faster convergence and generating higher-quality 3D reconstructions, as evidenced by higher
 Intersection over Union (IoU) scores, while maintaining a comparable computational burden in terms of time and memory usage when
 compared to existing methods.
+![alt text](https://github.com/ujinsong23/enhanced_ConvONet/blob/master/Training%20Pipeline.jpg)
 
 
 ## Installation
